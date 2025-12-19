@@ -6,6 +6,12 @@
 
 // Load Wi-Fi library
 #include <WiFi.h>
+#include <Adafruit_NeoPixel.h>      //Adiciona a biblioteca Adafruit NeoPixel
+
+
+#define D_in D10          // arduino pin to handle data line
+#define led_count 15      // Count of leds of stripe
+Adafruit_NeoPixel pixels(led_count, D_in);
 
 // Replace with your network credentials
 const char* ssid     = "ESP32-Access-Point";
@@ -25,11 +31,36 @@ String output27State = "off";
 const int output26 = 26;
 const int output27 = 27;
 
+uint32_t color_table[led_count] = {
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(255, 255, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255),
+  pixels.Color(0, 0, 255)
+};
+
 void setup() {
 
   Serial.begin(115200);
-  // Initialize the output variables as outputs
- 
+  pixels.begin();
+
+  pixels.clear();      //desliga todos os LEDs
+  pixels.setBrightness(100);
+  for(int i = 0; i < led_count; i++)
+  {        //para i = 0, se i menor que a quantidade de leds, incremente 1 em i
+    pixels.setPixelColor(i, color_table[i]);     //liga o led correspondente ao número da variável i na cor vermelha
+    pixels.show();      //executa os parâmetros do comando acima
+  }  
   // Connect to Wi-Fi network with SSID and password
   Serial.print("Setting AP (Access Point)…");
   // Remove the password parameter, if you want the AP (Access Point) to be open
