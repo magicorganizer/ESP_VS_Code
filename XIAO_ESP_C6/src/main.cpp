@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <Adafruit_NeoPixel.h>      //Adiciona a biblioteca Adafruit NeoPixel
 #include <Preferences.h>            //For NVS (Non-Volatile Storage)
+#include <time.h>                   //For time functions
 
 
 #define D_in D10          // arduino pin to handle data line
@@ -20,11 +21,16 @@ struct nvm_parameters {
   uint8_t red;
   uint8_t green;
   uint8_t blue;
+  uint32_t timestamp;  // Unix timestamp for RTC
 };
 
 Adafruit_NeoPixel pixels(led_count, D_in);
 Preferences preferences;
 nvm_parameters nvm_params;
+
+// Software RTC variables
+uint32_t rtc_timestamp = 0;
+unsigned long last_millis = 0;
 
 // Replace with your network credentials
 const char* ssid     = "ESP32-Access-Point";
@@ -68,6 +74,9 @@ void load_nvm_parameters();
 void save_nvm_parameters();
 void set_default_nvm_parameters();
 void handle_wifi_client();
+void update_rtc();
+void set_rtc_time(uint32_t timestamp);
+String get_rtc_string();
 
 
 
@@ -99,6 +108,8 @@ void setup()
 
 void loop() 
 {
+  // Update software RTC
+  update_rtc();
   // Handle incoming client requests
   handle_wifi_client();
 }
@@ -124,8 +135,13 @@ void load_nvm_parameters()
   nvm_params.red = preferences.getUChar("red", 0);
   nvm_params.green = preferences.getUChar("green", 0);
   nvm_params.blue = preferences.getUChar("blue", 0);
+  nvm_params.timestamp = preferences.getULong("timestamp", 0);
   
   preferences.end();
+  
+  // Set RTC from saved timestamp
+  rtc_timestamp = nvm_params.timestamp;
+  last_millis = millis();
   
   Serial.println("NVM Parameters loaded:");
   Serial.print("  Brightness: ");
@@ -136,6 +152,8 @@ void load_nvm_parameters()
   Serial.println(nvm_params.green);
   Serial.print("  Blue: ");
   Serial.println(nvm_params.blue);
+  Serial.print("  RTC: ");
+  Serial.println(get_rtc_string());
 }
 
 
@@ -147,6 +165,7 @@ void save_nvm_parameters()
   preferences.putUChar("red", nvm_params.red);
   preferences.putUChar("green", nvm_params.green);
   preferences.putUChar("blue", nvm_params.blue);
+  preferences.putULong("timestamp", rtc_timestamp);
   
   preferences.end();
   
@@ -160,8 +179,43 @@ void set_default_nvm_parameters()
   nvm_params.red = 0;
   nvm_params.green = 0;
   nvm_params.blue = 255;
+  nvm_params.timestamp = 0;  // Default to 1970-01-01
   save_nvm_parameters();
   update_color_table();
+}
+
+
+void update_rtc()
+{
+  // Update timestamp based on elapsed milliseconds
+  unsigned long current_millis = millis();
+  unsigned long elapsed = current_millis - last_millis;
+  
+  rtc_timestamp += elapsed / 1000;  // Add seconds
+  last_millis = current_millis;
+}
+
+
+void set_rtc_time(uint32_t timestamp)
+{
+  rtc_timestamp = timestamp;
+  last_millis = millis();
+  nvm_params.timestamp = rtc_timestamp;
+  save_nvm_parameters();
+  
+  Serial.print("RTC set to: ");
+  Serial.println(get_rtc_string());
+}
+
+
+String get_rtc_string()
+{
+  time_t now = rtc_timestamp;
+  struct tm* timeinfo = localtime(&now);
+  
+  char buffer[30];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+  return String(buffer);
 }
 
 
@@ -270,6 +324,15 @@ void handle_wifi_client()
               Serial.print("Blue set to: ");
               Serial.println(nvm_params.blue);
             }
+            // Parse HTTP requests for RTC time setting (format: /settime/1234567890)
+            else if (header.indexOf("GET /settime/") >= 0)
+            {
+              int startIdx = header.indexOf("GET /settime/") + 13;
+              int endIdx = header.indexOf(" ", startIdx);
+              String timestampStr = header.substring(startIdx, endIdx);
+              uint32_t newTimestamp = (uint32_t)timestampStr.toInt();
+              set_rtc_time(newTimestamp);
+            }
             // Parse HTTP requests for reset
             else if (header.indexOf("GET /reset") >= 0)
             {
@@ -291,6 +354,14 @@ void handle_wifi_client()
 
             // Web Page Heading
             client.println("<body><h1>ESP32 Web Server</h1>");
+
+            // Display RTC Section
+            client.println("<h2>System Time (RTC)</h2>");
+            client.println("<p>Current Time: " + get_rtc_string() + "</p>");
+            client.println("<p>Unix Timestamp: " + String(rtc_timestamp) + "</p>");
+            client.println("<input type=\"text\" id=\"timestampInput\" placeholder=\"Enter Unix timestamp\" value=\"\" style=\"width: 250px; padding: 8px; font-size: 16px; margin: 5px;\">");
+            client.println("<button onclick=\"setTime()\" class=\"button\" style=\"padding: 8px 20px; font-size: 16px;\">Set Time</button>");
+            client.println("<button onclick=\"syncNow()\" class=\"button\" style=\"padding: 8px 20px; font-size: 16px;\">Sync Now</button>");
 
             // Display current state, and ON/OFF buttons for GPIO 26
             client.println("<h2>GPIO Control</h2>");
@@ -331,7 +402,7 @@ void handle_wifi_client()
 
             client.println("<p><a href=\"/reset\"><button class=\"button button2\">Reset to Default</button></a></p>");
 
-            // JavaScript to handle slider inputs
+            // JavaScript to handle slider inputs and RTC functions
             client.println("<script>");
             client.println("document.getElementById('brightnessSlider').addEventListener('input', function() {");
             client.println("  window.location = '/brightness/' + this.value;");
@@ -345,6 +416,18 @@ void handle_wifi_client()
             client.println("document.getElementById('blueSlider').addEventListener('input', function() {");
             client.println("  window.location = '/blue/' + this.value;");
             client.println("});");
+            client.println("function setTime() {");
+            client.println("  var timestamp = document.getElementById('timestampInput').value;");
+            client.println("  if (timestamp) {");
+            client.println("    window.location = '/settime/' + timestamp;");
+            client.println("  } else {");
+            client.println("    alert('Please enter a valid Unix timestamp');");
+            client.println("  }");
+            client.println("}");
+            client.println("function syncNow() {");
+            client.println("  var now = Math.floor(Date.now() / 1000);");
+            client.println("  window.location = '/settime/' + now;");
+            client.println("}");
             client.println("</script>");
             client.println("</body></html>");
 
