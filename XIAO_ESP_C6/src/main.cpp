@@ -22,6 +22,8 @@ struct nvm_parameters {
   uint8_t green;
   uint8_t blue;
   uint32_t timestamp;  // Unix timestamp for RTC
+  int8_t tz_offset_hours; // timezone offset hours (e.g. +1 for CET)
+  uint8_t auto_dst; // 1=auto DST enabled, 0=disabled
 };
 
 Adafruit_NeoPixel pixels(led_count, D_in);
@@ -31,6 +33,7 @@ nvm_parameters nvm_params;
 // Software RTC variables
 uint32_t rtc_timestamp = 0;
 unsigned long last_millis = 0;
+uint32_t last_printed_second = 0;
 
 // Replace with your network credentials
 const char* ssid     = "ESP32-Access-Point";
@@ -136,10 +139,12 @@ void load_nvm_parameters()
   nvm_params.green = preferences.getUChar("green", 0);
   nvm_params.blue = preferences.getUChar("blue", 0);
   nvm_params.timestamp = preferences.getULong("timestamp", 0);
+  nvm_params.tz_offset_hours = preferences.getChar("tz", 1);
+  nvm_params.auto_dst = preferences.getUChar("auto_dst", 1);
   
   preferences.end();
   
-  // Set RTC from saved timestamp
+  // Set RTC from saved timestamp and tz
   rtc_timestamp = nvm_params.timestamp;
   last_millis = millis();
   
@@ -166,6 +171,8 @@ void save_nvm_parameters()
   preferences.putUChar("green", nvm_params.green);
   preferences.putUChar("blue", nvm_params.blue);
   preferences.putULong("timestamp", rtc_timestamp);
+  preferences.putChar("tz", nvm_params.tz_offset_hours);
+  preferences.putUChar("auto_dst", nvm_params.auto_dst);
   
   preferences.end();
   
@@ -180,6 +187,8 @@ void set_default_nvm_parameters()
   nvm_params.green = 0;
   nvm_params.blue = 255;
   nvm_params.timestamp = 0;  // Default to 1970-01-01
+  nvm_params.tz_offset_hours = 1; // default CET
+  nvm_params.auto_dst = 1; // enable DST by default
   save_nvm_parameters();
   update_color_table();
 }
@@ -191,8 +200,19 @@ void update_rtc()
   unsigned long current_millis = millis();
   unsigned long elapsed = current_millis - last_millis;
   
-  rtc_timestamp += elapsed / 1000;  // Add seconds
-  last_millis = current_millis;
+  uint32_t sec_increment = elapsed / 1000;  // whole seconds elapsed
+  if (sec_increment > 0) {
+    rtc_timestamp += sec_increment;  // Add seconds
+    // advance last_millis by the consumed whole seconds to keep remainder
+    last_millis += sec_increment * 1000;
+
+    // Print the current time once per second (when seconds change)
+    if (rtc_timestamp != last_printed_second) {
+      last_printed_second = rtc_timestamp;
+      Serial.print("RTC: ");
+      Serial.println(get_rtc_string());
+    }
+  }
 }
 
 
@@ -210,9 +230,57 @@ void set_rtc_time(uint32_t timestamp)
 
 String get_rtc_string()
 {
-  time_t now = rtc_timestamp;
-  struct tm* timeinfo = localtime(&now);
-  
+  // Apply timezone offset stored in nvm_params and format as local time
+  time_t adj = (time_t)rtc_timestamp + (int32_t)nvm_params.tz_offset_hours * 3600;
+
+  // If auto DST is enabled, apply DST rule for typical European DST (last Sunday Mar-Oct)
+  if (nvm_params.auto_dst) {
+    // compute local tm for adjusted time
+    time_t localt = adj;
+    struct tm tm_local = *gmtime(&localt);
+    int year = tm_local.tm_year + 1900;
+    int month = tm_local.tm_mon + 1;
+    int day = tm_local.tm_mday;
+    int hour = tm_local.tm_hour;
+
+    // helper: compute weekday for a given date (Zeller's congruence) 0=Sunday
+    auto weekday = [](int y, int m, int d)->int {
+      if (m < 3) { m += 12; y -= 1; }
+      int K = y % 100;
+      int J = y / 100;
+      int h = (d + (13*(m+1))/5 + K + K/4 + J/4 + 5*J) % 7; // 0=Saturday
+      int w = ((h + 6) % 7); // convert to 0=Sunday
+      return w;
+    };
+
+    auto lastSunday = [&](int y, int m)->int {
+      int lastDay;
+      // days per month
+      if (m==1||m==3||m==5||m==7||m==8||m==10||m==12) lastDay = 31;
+      else if (m==4||m==6||m==9||m==11) lastDay = 30;
+      else { // feb
+        bool leap = ( (y%4==0 && y%100!=0) || (y%400==0) );
+        lastDay = leap ? 29 : 28;
+      }
+      int wd = weekday(y, m, lastDay);
+      int lastSun = lastDay - wd;
+      return lastSun;
+    };
+
+    if ( (month > 3 && month < 10) ) {
+      // definitely DST
+      adj += 3600;
+    } else if (month == 3) {
+      int ls = lastSunday(year, 3);
+      if (day > ls || (day == ls && hour >= 1)) adj += 3600;
+    } else if (month == 10) {
+      int ls = lastSunday(year, 10);
+      if (day < ls || (day == ls && hour < 1)) adj += 3600;
+    }
+  }
+
+  struct tm* timeinfo = gmtime(&adj); // use gmtime since we've adjusted
+
   char buffer[30];
   strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
   return String(buffer);
@@ -333,6 +401,30 @@ void handle_wifi_client()
               uint32_t newTimestamp = (uint32_t)timestampStr.toInt();
               set_rtc_time(newTimestamp);
             }
+            // Parse HTTP requests for timezone setting (format: /settz/<hours>)
+            else if (header.indexOf("GET /settz/") >= 0)
+            {
+              int startIdx = header.indexOf("GET /settz/") + 11;
+              int endIdx = header.indexOf(" ", startIdx);
+              String tzStr = header.substring(startIdx, endIdx);
+              int tz = tzStr.toInt();
+              nvm_params.tz_offset_hours = (int8_t)tz;
+              save_nvm_parameters();
+              Serial.print("Timezone offset set to: ");
+              Serial.println(nvm_params.tz_offset_hours);
+            }
+            // Parse HTTP requests for auto DST setting (format: /setautodst/0 or /setautodst/1)
+            else if (header.indexOf("GET /setautodst/") >= 0)
+            {
+              int startIdx = header.indexOf("GET /setautodst/") + 16;
+              int endIdx = header.indexOf(" ", startIdx);
+              String v = header.substring(startIdx, endIdx);
+              int val = v.toInt();
+              nvm_params.auto_dst = (val != 0) ? 1 : 0;
+              save_nvm_parameters();
+              Serial.print("Auto DST set to: ");
+              Serial.println(nvm_params.auto_dst);
+            }
             // Parse HTTP requests for reset
             else if (header.indexOf("GET /reset") >= 0)
             {
@@ -358,10 +450,12 @@ void handle_wifi_client()
             // Display RTC Section
             client.println("<h2>System Time (RTC)</h2>");
             client.println("<p>Current Time: " + get_rtc_string() + "</p>");
-            client.println("<p>Unix Timestamp: " + String(rtc_timestamp) + "</p>");
-            client.println("<input type=\"text\" id=\"timestampInput\" placeholder=\"Enter Unix timestamp\" value=\"\" style=\"width: 250px; padding: 8px; font-size: 16px; margin: 5px;\">");
-            client.println("<button onclick=\"setTime()\" class=\"button\" style=\"padding: 8px 20px; font-size: 16px;\">Set Time</button>");
-            client.println("<button onclick=\"syncNow()\" class=\"button\" style=\"padding: 8px 20px; font-size: 16px;\">Sync Now</button>");
+            //client.println("<p>Unix Timestamp: " + String(rtc_timestamp) + "</p>");
+            //client.println("<p>Timezone offset (hours): " + String(nvm_params.tz_offset_hours) + "</p>");
+            //client.println("<input type=\"text\" id=\"tzInput\" placeholder=\"e.g. 1 or -5\" value=\"" + String(nvm_params.tz_offset_hours) + "\" style=\"width:80px; padding:6px; margin:6px; font-size:16px;\">");
+            //client.println("<button onclick=\"setTz()\" class=\"button\" style=\"padding: 8px 20px; font-size: 16px;\">Set TZ</button>");
+            //client.println("<label style=\"margin-left:10px; font-size:16px;\"><input type=\"checkbox\" id=\"autoDstCb\" " + String(nvm_params.auto_dst ? "checked" : "") + " onclick=\"setAutoDst()\" /> Auto DST</label>");
+            client.println("<button onclick=\"syncNow()\" class=\"button\" style=\"padding: 8px 20px; font-size: 16px;\">Sync time with smartphone</button>");
 
             // Display current state, and ON/OFF buttons for GPIO 26
             client.println("<h2>GPIO Control</h2>");
@@ -416,13 +510,19 @@ void handle_wifi_client()
             client.println("document.getElementById('blueSlider').addEventListener('input', function() {");
             client.println("  window.location = '/blue/' + this.value;");
             client.println("});");
-            client.println("function setTime() {");
-            client.println("  var timestamp = document.getElementById('timestampInput').value;");
-            client.println("  if (timestamp) {");
-            client.println("    window.location = '/settime/' + timestamp;");
+            client.println("");
+            client.println("function setTz() {");
+            client.println("  var tz = document.getElementById('tzInput').value;");
+            client.println("  if (tz !== '') {");
+            client.println("    window.location = '/settz/' + tz;");
             client.println("  } else {");
-            client.println("    alert('Please enter a valid Unix timestamp');");
+            client.println("    alert('Please enter a timezone offset (e.g. 1 or -5)');");
             client.println("  }");
+            client.println("}");
+            client.println("function setAutoDst() {");
+            client.println("  var cb = document.getElementById('autoDstCb');");
+            client.println("  var v = cb.checked ? 1 : 0;");
+            client.println("  window.location = '/setautodst/' + v;");
             client.println("}");
             client.println("function syncNow() {");
             client.println("  var now = Math.floor(Date.now() / 1000);");
