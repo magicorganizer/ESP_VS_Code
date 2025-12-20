@@ -15,6 +15,21 @@
 #define led_count 15      // Count of leds of stripe
 #define NVS_NAMESPACE "nvm_params"
 
+// Structure for a single timer slot (on or off time)
+struct timer_slot {
+  uint8_t hour;   // 0-23
+  uint8_t minute; // 0-59
+  uint8_t type;   // 0=off, 1=on
+  uint8_t enabled; // 1=enabled, 0=disabled
+};
+
+// Structure for timer pair (on + off) + enable flag
+struct timer_pair {
+  timer_slot on_time;   // when to turn on (brightness=100)
+  timer_slot off_time;  // when to turn off (brightness=0)
+  uint8_t pair_enabled; // 1=this pair active, 0=inactive
+};
+
 // Structure for persistent parameters
 struct nvm_parameters {
   uint8_t brightness;
@@ -30,13 +45,16 @@ Adafruit_NeoPixel pixels(led_count, D_in);
 Preferences preferences;
 nvm_parameters nvm_params;
 
+// 2 timer pairs for schedule (early_on/early_off, evening_on/evening_off)
+timer_pair timers[2];
+
 // Software RTC variables
 uint32_t rtc_timestamp = 0;
 unsigned long last_millis = 0;
 uint32_t last_printed_second = 0;
 
 // Replace with your network credentials
-const char* ssid     = "ESP32-Access-Point";
+const char* ssid     = "ESP32-AP-Weihnachten";
 const char* password = "123456789";
 
 // Set web server port number to 80
@@ -80,6 +98,11 @@ void handle_wifi_client();
 void update_rtc();
 void set_rtc_time(uint32_t timestamp);
 String get_rtc_string();
+void load_timers();
+void save_timers();
+void check_timers();
+void set_timer_slot(uint8_t slot, uint8_t hour, uint8_t minute, uint8_t type, uint8_t enabled);
+void set_timer_pair_enabled(uint8_t pair, uint8_t enabled);
 
 
 
@@ -88,10 +111,11 @@ void setup()
   Serial.begin(115200);
   pixels.begin();
 
-  set_default_nvm_parameters();
-
   // Load persistent parameters
   load_nvm_parameters();
+
+  // Load timers from NVS
+  load_timers();
 
   update_color_table();
 
@@ -113,6 +137,8 @@ void loop()
 {
   // Update software RTC
   update_rtc();
+  // Check and apply timers
+  check_timers();
   // Handle incoming client requests
   handle_wifi_client();
 }
@@ -287,6 +313,131 @@ String get_rtc_string()
 }
 
 
+void load_timers()
+{
+  preferences.begin(NVS_NAMESPACE, true); // read-only mode
+  
+  // Load all 2 timer pairs
+  for (int i = 0; i < 2; i++) {
+    String on_h_key = "t" + String(i) + "_on_h";
+    String on_m_key = "t" + String(i) + "_on_m";
+    String off_h_key = "t" + String(i) + "_off_h";
+    String off_m_key = "t" + String(i) + "_off_m";
+    String en_key = "t" + String(i) + "_en";
+    
+    timers[i].on_time.hour = preferences.getUChar(on_h_key.c_str(), 8);
+    timers[i].on_time.minute = preferences.getUChar(on_m_key.c_str(), 0);
+    timers[i].on_time.type = 1; // always on
+    timers[i].on_time.enabled = 1;
+    
+    timers[i].off_time.hour = preferences.getUChar(off_h_key.c_str(), 22);
+    timers[i].off_time.minute = preferences.getUChar(off_m_key.c_str(), 0);
+    timers[i].off_time.type = 0; // always off
+    timers[i].off_time.enabled = 1;
+    
+    timers[i].pair_enabled = preferences.getUChar(en_key.c_str(), (i == 0) ? 1 : 0);
+  }
+  
+  preferences.end();
+  
+  Serial.println("Timers loaded from NVS");
+}
+
+
+void save_timers()
+{
+  preferences.begin(NVS_NAMESPACE, false); // write mode
+  
+  for (int i = 0; i < 2; i++) {
+    String on_h_key = "t" + String(i) + "_on_h";
+    String on_m_key = "t" + String(i) + "_on_m";
+    String off_h_key = "t" + String(i) + "_off_h";
+    String off_m_key = "t" + String(i) + "_off_m";
+    String en_key = "t" + String(i) + "_en";
+    
+    preferences.putUChar(on_h_key.c_str(), timers[i].on_time.hour);
+    preferences.putUChar(on_m_key.c_str(), timers[i].on_time.minute);
+    preferences.putUChar(off_h_key.c_str(), timers[i].off_time.hour);
+    preferences.putUChar(off_m_key.c_str(), timers[i].off_time.minute);
+    preferences.putUChar(en_key.c_str(), timers[i].pair_enabled);
+  }
+  
+  preferences.end();
+  
+  Serial.println("Timers saved to NVS");
+}
+
+
+void check_timers()
+{
+  // Get current hour and minute from RTC
+  time_t now = rtc_timestamp + (int32_t)nvm_params.tz_offset_hours * 3600;
+  struct tm* timeinfo = gmtime(&now);
+  int cur_hour = timeinfo->tm_hour;
+  int cur_min = timeinfo->tm_min;
+  
+  // Check each enabled timer pair
+  for (int i = 0; i < 2; i++) {
+    if (!timers[i].pair_enabled) continue;
+    
+    // Check if we match the ON time exactly
+    if (cur_hour == timers[i].on_time.hour && cur_min == timers[i].on_time.minute) {
+      nvm_params.brightness = 100;
+      save_nvm_parameters();
+      update_color_table();
+      Serial.print("Timer ");
+      Serial.print(i);
+      Serial.println(" ON triggered");
+      delay(30000); // prevent re-trigger within 30 seconds
+    }
+    
+    // Check if we match the OFF time exactly
+    if (cur_hour == timers[i].off_time.hour && cur_min == timers[i].off_time.minute) {
+      nvm_params.brightness = 0;
+      save_nvm_parameters();
+      update_color_table();
+      Serial.print("Timer ");
+      Serial.print(i);
+      Serial.println(" OFF triggered");
+      delay(30000); // prevent re-trigger within 30 seconds
+    }
+  }
+}
+
+
+void set_timer_slot(uint8_t pair, uint8_t hour, uint8_t minute, uint8_t type, uint8_t enabled)
+{
+  if (pair >= 2) return;
+  
+  if (type == 1) { // ON time
+    timers[pair].on_time.hour = hour;
+    timers[pair].on_time.minute = minute;
+    timers[pair].on_time.type = 1;
+    timers[pair].on_time.enabled = enabled;
+  } else { // OFF time
+    timers[pair].off_time.hour = hour;
+    timers[pair].off_time.minute = minute;
+    timers[pair].off_time.type = 0;
+    timers[pair].off_time.enabled = enabled;
+  }
+  
+  save_timers();
+}
+
+
+void set_timer_pair_enabled(uint8_t pair, uint8_t enabled)
+{
+  if (pair >= 2) return;
+  timers[pair].pair_enabled = (enabled != 0) ? 1 : 0;
+  save_timers();
+  
+  Serial.print("Timer pair ");
+  Serial.print(pair);
+  Serial.print(" set to: ");
+  Serial.println(timers[pair].pair_enabled);
+}
+
+
 void handle_wifi_client()
 {
   WiFiClient client = server.accept(); // Listen for incoming clients
@@ -315,33 +466,8 @@ void handle_wifi_client()
             client.println("Connection: close");
             client.println();
 
-            // Parse HTTP requests for GPIO control
-            if (header.indexOf("GET /26/on") >= 0)
-            {
-              Serial.println("GPIO 26 on");
-              output26State = "on";
-              digitalWrite(output26, HIGH);
-            }
-            else if (header.indexOf("GET /26/off") >= 0)
-            {
-              Serial.println("GPIO 26 off");
-              output26State = "off";
-              digitalWrite(output26, LOW);
-            }
-            else if (header.indexOf("GET /27/on") >= 0)
-            {
-              Serial.println("GPIO 27 on");
-              output27State = "on";
-              digitalWrite(output27, HIGH);
-            }
-            else if (header.indexOf("GET /27/off") >= 0)
-            {
-              Serial.println("GPIO 27 off");
-              output27State = "off";
-              digitalWrite(output27, LOW);
-            }
             // Parse HTTP requests for brightness control
-            else if (header.indexOf("GET /brightness/") >= 0)
+            if (header.indexOf("GET /brightness/") >= 0)
             {
               int startIdx = header.indexOf("GET /brightness/") + 16;
               int endIdx = header.indexOf(" ", startIdx);
@@ -425,6 +551,54 @@ void handle_wifi_client()
               Serial.print("Auto DST set to: ");
               Serial.println(nvm_params.auto_dst);
             }
+            // Parse HTTP requests for timer control (format: /settimer/pair/type/hour/minute)
+            // type: 0=off time, 1=on time
+            else if (header.indexOf("GET /settimer/") >= 0)
+            {
+              int startIdx = header.indexOf("GET /settimer/") + 14;
+              // Parse: /settimer/pair/type/hour/minute
+              int idx1 = header.indexOf("/", startIdx);
+              int idx2 = header.indexOf("/", idx1 + 1);
+              int idx3 = header.indexOf("/", idx2 + 1);
+              int idx4 = header.indexOf(" ", idx3 + 1);
+              
+              String pair_str = header.substring(startIdx, idx1);
+              String type_str = header.substring(idx1 + 1, idx2);
+              String hour_str = header.substring(idx2 + 1, idx3);
+              String minute_str = header.substring(idx3 + 1, idx4);
+              
+              uint8_t pair = pair_str.toInt();
+              uint8_t type = type_str.toInt();
+              uint8_t hour = hour_str.toInt();
+              uint8_t minute = minute_str.toInt();
+              
+              set_timer_slot(pair, hour, minute, type, 1);
+              
+              Serial.print("Timer ");
+              Serial.print(pair);
+              Serial.print(" ");
+              Serial.print(type ? "ON" : "OFF");
+              Serial.print(" set to ");
+              Serial.print(hour);
+              Serial.print(":");
+              if (minute < 10) Serial.print("0");
+              Serial.println(minute);
+            }
+            // Parse HTTP requests for timer pair enable/disable (format: /settimeren/pair/0|1)
+            else if (header.indexOf("GET /settimeren/") >= 0)
+            {
+              int startIdx = header.indexOf("GET /settimeren/") + 16;
+              int idx1 = header.indexOf("/", startIdx);
+              int idx2 = header.indexOf(" ", idx1 + 1);
+              
+              String pair_str = header.substring(startIdx, idx1);
+              String enabled_str = header.substring(idx1 + 1, idx2);
+              
+              uint8_t pair = pair_str.toInt();
+              uint8_t enabled = enabled_str.toInt();
+              
+              set_timer_pair_enabled(pair, enabled);
+            }
             // Parse HTTP requests for reset
             else if (header.indexOf("GET /reset") >= 0)
             {
@@ -456,29 +630,6 @@ void handle_wifi_client()
             //client.println("<button onclick=\"setTz()\" class=\"button\" style=\"padding: 8px 20px; font-size: 16px;\">Set TZ</button>");
             //client.println("<label style=\"margin-left:10px; font-size:16px;\"><input type=\"checkbox\" id=\"autoDstCb\" " + String(nvm_params.auto_dst ? "checked" : "") + " onclick=\"setAutoDst()\" /> Auto DST</label>");
             client.println("<button onclick=\"syncNow()\" class=\"button\" style=\"padding: 8px 20px; font-size: 16px;\">Sync time with smartphone</button>");
-
-            // Display current state, and ON/OFF buttons for GPIO 26
-            client.println("<h2>GPIO Control</h2>");
-            client.println("<p>GPIO 26 - State " + output26State + "</p>");
-            if (output26State == "off")
-            {
-              client.println("<p><a href=\"/26/on\"><button class=\"button\">ON</button></a></p>");
-            }
-            else
-            {
-              client.println("<p><a href=\"/26/off\"><button class=\"button button2\">OFF</button></a></p>");
-            }
-
-            // Display current state, and ON/OFF buttons for GPIO 27
-            client.println("<p>GPIO 27 - State " + output27State + "</p>");
-            if (output27State == "off")
-            {
-              client.println("<p><a href=\"/27/on\"><button class=\"button\">ON</button></a></p>");
-            }
-            else
-            {
-              client.println("<p><a href=\"/27/off\"><button class=\"button button2\">OFF</button></a></p>");
-            }
 
             // Display LED Color Control Section
             client.println("<h2>LED Color Control</h2>");
@@ -528,7 +679,44 @@ void handle_wifi_client()
             client.println("  var now = Math.floor(Date.now() / 1000);");
             client.println("  window.location = '/settime/' + now;");
             client.println("}");
+            
+            // Timer functions
+            client.println("function setTimer(pair, type) {");
+            client.println("  var hour = document.getElementById('timer' + pair + '_' + type + '_h').value;");
+            client.println("  var minute = document.getElementById('timer' + pair + '_' + type + '_m').value;");
+            client.println("  window.location = '/settimer/' + pair + '/' + type + '/' + hour + '/' + minute;");
+            client.println("}");
+            client.println("function setTimerEnabled(pair) {");
+            client.println("  var enabled = document.getElementById('timerCb' + pair).checked ? 1 : 0;");
+            client.println("  window.location = '/settimeren/' + pair + '/' + enabled;");
+            client.println("}");
+            
             client.println("</script>");
+            
+            // Add Timer Schedule section before closing body
+            client.println("<h2>Timer Schedule</h2>");
+            
+            for (int i = 0; i < 2; i++) {
+              client.println("<div style=\"border:1px solid #ccc; margin:10px; padding:10px; border-radius:5px;\">");
+              client.println("<label><input type=\"checkbox\" id=\"timerCb" + String(i) + "\" " + 
+                String(timers[i].pair_enabled ? "checked" : "") + 
+                " onchange=\"setTimerEnabled(" + String(i) + ")\" /> Pair " + String(i + 1) + " Enabled</label>");
+              
+              // ON time - button inline
+              client.println("<p>Turn ON at: ");
+              client.println("<input type=\"number\" id=\"timer" + String(i) + "_1_h\" min=\"0\" max=\"23\" value=\"" + String(timers[i].on_time.hour) + "\" style=\"width:50px;\"> : ");
+              client.println("<input type=\"number\" id=\"timer" + String(i) + "_1_m\" min=\"0\" max=\"59\" value=\"" + String(timers[i].on_time.minute) + "\" style=\"width:50px;\"> ");
+              client.println("<button style=\"padding:6px 12px; font-size:14px;\" onclick=\"setTimer(" + String(i) + ", 1)\">Set</button></p>");
+              
+              // OFF time - button inline
+              client.println("<p>Turn OFF at: ");
+              client.println("<input type=\"number\" id=\"timer" + String(i) + "_0_h\" min=\"0\" max=\"23\" value=\"" + String(timers[i].off_time.hour) + "\" style=\"width:50px;\"> : ");
+              client.println("<input type=\"number\" id=\"timer" + String(i) + "_0_m\" min=\"0\" max=\"59\" value=\"" + String(timers[i].off_time.minute) + "\" style=\"width:50px;\"> ");
+              client.println("<button style=\"padding:6px 12px; font-size:14px;\" onclick=\"setTimer(" + String(i) + ", 0)\">Set</button></p>");
+              
+              client.println("</div>");
+            }
+            
             client.println("</body></html>");
 
             // The HTTP response ends with another blank line
