@@ -1,8 +1,4 @@
 #include <Arduino.h>
-/*********
-  Rui Santos
-  Complete project details at https://randomnerdtutorials.com  
-*********/
 
 // Load Wi-Fi library
 #include <WiFi.h>
@@ -54,7 +50,7 @@ unsigned long last_millis = 0;
 uint32_t last_printed_second = 0;
 
 // Replace with your network credentials
-const char* ssid     = "ESP32-AP-Weihnachten";
+const char* ssid     = "ESP32-Weihnachten";
 const char* password = "123456789";
 
 // Set web server port number to 80
@@ -62,32 +58,6 @@ WiFiServer server(80);
 
 // Variable to store the HTTP request
 String header;
-
-// Auxiliar variables to store the current output state
-String output26State = "off";
-String output27State = "off";
-
-// Assign output variables to GPIO pins
-const int output26 = 26;
-const int output27 = 27;
-
-uint32_t color_table[led_count] = {
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(255, 255, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255),
-  pixels.Color(0, 0, 255)
-};
 
 // prototypes
 void update_color_table();
@@ -209,8 +179,8 @@ void save_nvm_parameters()
 void set_default_nvm_parameters()
 {
   nvm_params.brightness = 100;
-  nvm_params.red = 0;
-  nvm_params.green = 0;
+  nvm_params.red = 255;
+  nvm_params.green = 255;
   nvm_params.blue = 255;
   nvm_params.timestamp = 0;  // Default to 1970-01-01
   nvm_params.tz_offset_hours = 1; // default CET
