@@ -8,7 +8,7 @@
 
 
 #define D_in D10          // arduino pin to handle data line
-#define led_count 15      // Count of leds of stripe
+#define led_count 37       // Count of leds of stripe
 #define NVS_NAMESPACE "nvm_params"
 
 // Structure for a single timer slot (on or off time)
@@ -50,7 +50,8 @@ unsigned long last_millis = 0;
 uint32_t last_printed_second = 0;
 
 // Replace with your network credentials
-const char* ssid     = "ESP32-Weihnachten";
+//const char* ssid     = "ESP32-Weihnachten";
+const char* ssid     = "ESP32-Mopedbuddy";
 const char* password = "123456789";
 
 // Set web server port number to 80
@@ -118,7 +119,7 @@ void update_color_table()
   pixels.clear(); // desliga todos os LEDs
   pixels.setBrightness(nvm_params.brightness);
   for (int i = 0; i < led_count; i++)
-  {                                          
+  {     
     pixels.setPixelColor(i, pixels.Color(nvm_params.red, nvm_params.green, nvm_params.blue)); 
     pixels.show();                           
   }
