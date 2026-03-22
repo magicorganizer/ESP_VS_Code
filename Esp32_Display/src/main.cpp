@@ -354,6 +354,87 @@ const uint16_t imageData[] = {
 };
 
 
+typedef enum
+{
+  TMRTYPE_ONCE,
+  TMRTYPE_PERIODIC
+}ETimerType;
+
+typedef struct
+{
+  boolean       active;
+  unsigned long lastmillis; 
+  unsigned int  interval;
+  ETimerType    timertype;
+  void (*functionPtr)(void);
+} TTimerItem;
+
+#define NUMBER_OF_TIMERS 3
+TTimerItem mytimers[NUMBER_OF_TIMERS];
+
+void timerfunction1()
+{
+  Serial.println("timerfunction1");    
+} 
+
+void timerfunction2()
+{
+  Serial.println("timerfunction2");    
+} 
+
+void timerfunction3()
+{
+  Serial.println("timerfunction3");    
+} 
+
+void init_timer()
+{
+  mytimers[0].active      = true;
+  mytimers[0].lastmillis  = 0;
+  mytimers[0].interval    = 1000;
+  mytimers[0].timertype   = TMRTYPE_PERIODIC;
+  mytimers[0].functionPtr = timerfunction1;
+
+  mytimers[1].active      = false;
+  mytimers[1].lastmillis  = 0;
+  mytimers[1].interval    = 15000 * 60;
+  mytimers[1].timertype   = TMRTYPE_ONCE;
+  mytimers[1].functionPtr = timerfunction2;  
+  
+  mytimers[2].active      = false;
+  mytimers[2].lastmillis  = 0;
+  mytimers[2].interval    = 1000 * 60;          // minute tick
+  mytimers[2].timertype   = TMRTYPE_PERIODIC;
+  mytimers[2].functionPtr = timerfunction3;  
+}
+
+void handle_timers()
+{
+  byte timer_idx;
+  for(timer_idx = 0; timer_idx < NUMBER_OF_TIMERS; timer_idx++ )
+  {
+    if ( mytimers[timer_idx].active && (millis() - mytimers[timer_idx].lastmillis > mytimers[timer_idx].interval ))
+    {
+      (*mytimers[timer_idx].functionPtr)();
+      mytimers[timer_idx].lastmillis += mytimers[timer_idx].interval;  
+      
+      // handle periodicity
+      if( mytimers[timer_idx].timertype == TMRTYPE_ONCE)
+      {
+        mytimers[timer_idx].active = false;
+      }
+    } 
+  } 
+}
+
+void start_timer(byte timer_idx)
+{
+  mytimers[timer_idx].lastmillis = millis(); 
+  mytimers[timer_idx].active = true;
+  Serial.print("Start timer");
+}
+
+
 // void setup() {
 //   lcd.init(LCD_WIDTH, LCD_HEIGHT);
 //   lcd.setRotation(2);  //The parameters are: 0, 1, 2, 3, representing the rotation of the screen 0°, 90°, 180°, 270°
@@ -402,7 +483,7 @@ void setup() {
   lcd.fillScreen(ST77XX_BLACK);
 
   lcd.drawRGBBitmap(0,0,imageData,LCD_WIDTH,LCD_HEIGHT);  // Displaying images on the screen
-  delay(6000000);
+ // delay(6000000);
 
   // Initialize the output variables as outputs
   pinMode(output26, OUTPUT);
@@ -422,10 +503,15 @@ void setup() {
   Serial.println(IP);
   
   server.begin();
+
+  init_timer();  
+  start_timer(0);
 }
 
 void loop(){
   WiFiClient client = server.available();   // Listen for incoming clients
+
+  handle_timers();  
 
   if (client) {                             // If a new client connects,
     Serial.println("New Client.");          // print a message out in the serial port

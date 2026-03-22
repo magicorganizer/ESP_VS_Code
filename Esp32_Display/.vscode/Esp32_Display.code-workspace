@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"name": "ESP32_Display",
+			"path": "d:\Data\VSCode_PlatformIO_Workspace\ESP_VS_Code\Esp32_Display"
+		}
+	],
+	"settings": {}
+}
